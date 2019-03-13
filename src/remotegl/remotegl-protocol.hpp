@@ -114,18 +114,15 @@ struct tuple_invoker
     using return_type = typename signature<Func>::return_type;
     constexpr static const std::size_t arguments_count = signature<Func>::arguments_count;
 
-    template <typename... Args>
-    static inline typename std::enable_if<sizeof...(Args) == arguments_count, return_type>::type
-    invoke(invokable_type func, storage_type& STORAGE, Args... args) {
-        return func(std::forward<Args>(args)...);
+    template <size_t... Indices>
+    static inline return_type invoke(invokable_type func, storage_type& STORAGE,
+            std::index_sequence<Indices...>) {
+        return func(std::get<Indices>(std::forward<storage_type>(STORAGE))...);
     }
 
-    template <typename... Args>
-    static inline typename std::enable_if<sizeof...(Args) < arguments_count, return_type>::type
-    invoke(invokable_type func, storage_type& STORAGE, Args... args) {
-        constexpr std::size_t N = sizeof...(Args);
-        using T = typename std::tuple_element<N, storage_type>::type;
-        return invoke<Args...,T>(func, STORAGE, std::forward<Args>(args)..., std::get<N>(STORAGE));
+    static inline return_type invoke(invokable_type func, storage_type& STORAGE) {
+        return invoke(func, STORAGE,
+                std::make_index_sequence<arguments_count>{});
     }
 };
 
@@ -211,5 +208,34 @@ struct size_helpers {
         }
     };
 };
+
+/*namespace detail
+{
+    template <typename Tuple, typename Res = std::tuple<>>
+    struct nopointer_tuple_helper;
+
+
+    template<typename Res>
+    struct nopointer_tuple_helper<std::tuple<>, Res>
+    {
+        using type = Res;
+    };
+
+    template<typename T, typename... Ts, typename... TRes>
+    struct nopointer_tuple_helper<std::tuple<T, Ts...>, std::tuple<TRes...>> :
+        std::conditional<std::is_arithmetic<T>::value,
+            nopointer_tuple_helper<std::tuple<Ts...>, std::tuple<TRes...,T>>,
+            nopointer_tuple_helper<std::tuple<Ts...>, std::tuple<TRes...>>
+        >::type
+    {};
+}
+
+template <typename...Ts> struct nopointer_tuple
+{
+    using type = typename detail::nopointer_tuple_helper<std::tuple<Ts...>>::type;
+};
+
+static_assert(std::is_same<std::tuple<int, float>,
+        typename nopointer_tuple<int, int*, float>::type>::value, "oopsy poopsy");*/
 
 #endif /* REMOTEGL_PROTOCOL_HPP_ */
