@@ -1,10 +1,14 @@
 #ifndef REMOTEGL_PROTOCOL_HPP_
 #define REMOTEGL_PROTOCOL_HPP_
 
-#include <utility>
+#include <array>
 #include <tuple>
 
 #include <sys/uio.h>
+
+#include "signature.hpp"
+#include "size_hints.hpp"
+#include "standard_layout_tuple.hpp"
 
 enum class RemoteGLFunction
 {
@@ -69,146 +73,6 @@ enum class RemoteGLFunction
     OGL_glUniformMatrix4fv,
 };
 
-// fucking voodoo magic
-template<typename...Ts>
-using tuple_cat_t = decltype(std::tuple_cat(std::declval<Ts>()...));
-
-template<typename...Ts>
-using concrete_tuple2 = tuple_cat_t<
-    typename std::conditional<
-        std::is_arithmetic<Ts>::value,
-        std::tuple<Ts>,
-        std::tuple<>
-    >::type...
->;
-
-// helper to get useful parts of function signatures
-template <typename... Func>
-struct signature;
-
-// get information from a function pointer
-template <typename R, typename... Args>
-struct signature<R(*)(Args...)>
-{
-    using return_type = R;
-    using arguments_type = std::tuple<Args...>;
-    using concrete_arguments_type = concrete_tuple2<Args...>;
-    constexpr static const std::size_t arguments_count = sizeof...(Args);
-};
-
-// get information from a function signature
-template <typename R, typename... Args>
-struct signature<R(Args...)>
-{
-    using return_type = R;
-    using arguments_type = std::tuple<Args...>;
-    using concrete_arguments_type = concrete_tuple2<Args...>;
-    constexpr static const std::size_t arguments_count = sizeof...(Args);
-};
-
-template <typename Func>
-struct tuple_invoker
-{
-    using invokable_type = typename std::decay<Func>::type;
-    using storage_type = typename signature<Func>::arguments_type;
-    using return_type = typename signature<Func>::return_type;
-    constexpr static const std::size_t arguments_count = signature<Func>::arguments_count;
-
-    template <size_t... Indices>
-    static inline return_type invoke(invokable_type func, storage_type& STORAGE,
-            std::index_sequence<Indices...>) {
-        return func(std::get<Indices>(std::forward<storage_type>(STORAGE))...);
-    }
-
-    static inline return_type invoke(invokable_type func, storage_type& STORAGE) {
-        return invoke(func, STORAGE,
-                std::make_index_sequence<arguments_count>{});
-    }
-};
-
-// build an iovec for receiver
-template <typename StorageType, std::size_t N = 0>
-inline typename std::enable_if<N == std::tuple_size<StorageType>()>::type
-receiver_setup_iovec(StorageType& STORAGE, struct iovec* MSG)
-{
-    return;
-}
-
-template <typename StorageType, std::size_t N = 0>
-inline typename std::enable_if<N < std::tuple_size<StorageType>()>::type
-receiver_setup_iovec(StorageType& STORAGE, struct iovec* MSG)
-{
-    MSG[N] = { .iov_base = &std::get<N>(STORAGE), .iov_len = sizeof(std::get<N>(STORAGE)) };
-    return receiver_setup_iovec<StorageType,N+1>(STORAGE, MSG);
-}
-
-template <typename Func>
-struct receiver_impl {
-    using invokable_type = typename std::decay<Func>::type;
-    using storage_type = typename signature<Func>::arguments_type;
-    constexpr static const std::size_t argument_count = signature<Func>::arguments_count;
-
-    // basic invoker when return type is void
-    template<typename R = typename signature<Func>::return_type>
-    static inline typename std::enable_if<std::is_void<R>::value>::type
-            invoke(Func func, int fd)
-    {
-        storage_type STORAGE;
-        struct iovec MSG[argument_count];
-        receiver_setup_iovec(STORAGE, MSG);
-        readv(fd, MSG, argument_count);
-        tuple_invoker<Func>::invoke(func, STORAGE);
-    }
-
-    // basic invoker when return type is non-void and trivial
-    template<typename R = typename signature<Func>::return_type>
-    static inline typename std::enable_if<!std::is_void<R>::value && std::is_trivial<R>::value>::type
-            invoke(Func func, int fd)
-    {
-        storage_type STORAGE;
-        struct iovec MSG[argument_count];
-        receiver_setup_iovec(STORAGE, MSG);
-        readv(fd, MSG, argument_count);
-        auto ret = tuple_invoker<Func>::invoke(func, STORAGE);
-        write(fd, &ret, sizeof ret);
-    }
-};
-
-struct size_helpers {
-    // num helper for integers
-    template<int N>
-    struct num {
-        template<typename... Args>
-        static constexpr int value(Args... args) {
-            return N;
-        }
-    };
-
-    template<typename T, typename R>
-    struct add {
-        template<typename... Args>
-        static constexpr auto value(Args... args) {
-            return T::value(std::forward<Args>(args)...) + R::value(std::forward<Args>(args)...);
-        }
-    };
-
-    template<typename T, typename R>
-    struct mul {
-        template<typename... Args>
-        static constexpr auto value(Args... args) {
-            return T::value(std::forward<Args>(args)...) * R::value(std::forward<Args>(args)...);
-        }
-    };
-
-    template<int N>
-    struct arg {
-        template<typename... Args>
-        static constexpr auto value(Args... args) {
-            return std::get<N>(std::tuple<Args...>(std::forward<Args>(args)...));
-        }
-    };
-};
-
 /*namespace detail
 {
     template <typename Tuple, typename Res = std::tuple<>>
@@ -237,5 +101,215 @@ template <typename...Ts> struct nopointer_tuple
 
 static_assert(std::is_same<std::tuple<int, float>,
         typename nopointer_tuple<int, int*, float>::type>::value, "oopsy poopsy");*/
+
+template <typename Func>
+struct receiver_impl {
+    using invokable_type = typename std::decay<Func>::type;
+    using storage_type = typename signature<Func>::arguments_type;
+    using return_type = typename signature<Func>::return_type;
+    constexpr static const std::size_t argument_count = signature<Func>::arguments_count;
+
+    // build scatter/gather list for tuple
+    template <size_t...Indices>
+    static inline std::array<iovec, argument_count> _setup_iovec(storage_type& STORAGE, std::index_sequence<Indices...>) {
+        return { (iovec) { &std::get<Indices>(STORAGE), sizeof std::get<Indices>(STORAGE) }... };
+    }
+
+    static inline std::array<iovec, argument_count> _setup_iovec(storage_type& STORAGE) {
+        return _setup_iovec(STORAGE, std::make_index_sequence<argument_count>());
+    }
+
+    // invoke a function with args from a tuple
+    template <size_t... Indices>
+    static inline return_type _invoke(invokable_type func, storage_type& STORAGE,
+            std::index_sequence<Indices...>) {
+        return func(std::get<Indices>(std::forward<storage_type>(STORAGE))...);
+    }
+
+    static inline return_type _invoke(invokable_type func, storage_type& STORAGE) {
+        return _invoke(func, STORAGE,
+                std::make_index_sequence<argument_count>{});
+    }
+
+    // basic invoker when return type is void
+    template<typename R = typename signature<Func>::return_type>
+    static inline typename std::enable_if<std::is_void<R>::value>::type
+            invoke(Func func, int fd)
+    {
+        storage_type STORAGE;
+        auto scatter = _setup_iovec(STORAGE);
+        readv(fd, scatter.data(), scatter.size());
+        _invoke(func, STORAGE);
+    }
+
+    // basic invoker when return type is non-void and trivial
+    template<typename R = typename signature<Func>::return_type>
+    static inline typename std::enable_if<!std::is_void<R>::value && std::is_trivial<R>::value>::type
+            invoke(Func func, int fd)
+    {
+        storage_type STORAGE;
+        auto scatter = _setup_iovec(STORAGE);
+        readv(fd, scatter.data(), scatter.size());
+        auto ret = _invoke(func, STORAGE);
+        write(fd, &ret, sizeof ret);
+    }
+};
+
+template <typename Func>
+struct receiver_impl2 {
+    using invokable_type = typename std::decay<Func>::type;
+    using storage_type = typename signature<Func>::arguments_type2;
+    using return_type = typename signature<Func>::return_type;
+    constexpr static const std::size_t argument_count = signature<Func>::arguments_count;
+
+    // invoke a function with args from a tuple
+    template <size_t... Indices>
+    static inline return_type _invoke(invokable_type func, storage_type& STORAGE,
+            std::index_sequence<Indices...>) {
+        return func(remotegl::get<Indices>(STORAGE)...);
+    }
+
+    static inline return_type _invoke(invokable_type func, storage_type& STORAGE) {
+        return _invoke(func, STORAGE,
+                std::make_index_sequence<argument_count>{});
+    }
+
+    // basic invoker when return type is void
+    template<typename R = typename signature<Func>::return_type>
+    static inline typename std::enable_if<std::is_void<R>::value>::type
+            invoke(Func func, int fd)
+    {
+        storage_type STORAGE;
+        read(fd, &STORAGE, sizeof STORAGE);
+        _invoke(func, STORAGE);
+    }
+
+    // basic invoker when return type is non-void and trivial
+    /*template<typename R = typename signature<Func>::return_type>
+    static inline typename std::enable_if<!std::is_void<R>::value && std::is_trivial<R>::value>::type
+            invoke(Func func, int fd)
+    {
+        storage_type STORAGE;
+        auto scatter = _setup_iovec(STORAGE);
+        readv(fd, scatter.data(), scatter.size());
+        auto ret = _invoke(func, STORAGE);
+        write(fd, &ret, sizeof ret);
+    }*/
+};
+
+template<typename Func, RemoteGLFunction FuncCode, typename...SizeInfo>
+struct request : signature<Func>::concrete_arguments_type2
+{
+    
+
+private:
+
+
+};
+
+template <class T, typename...>
+struct integer_sequence_cat;
+
+template <class T>
+struct integer_sequence_cat<T> {
+    using type = std::integer_sequence<T>;
+};
+
+template <class T, T...Ints>
+struct integer_sequence_cat<T, std::integer_sequence<T,Ints...>> {
+    using type = std::integer_sequence<T,Ints...>;
+};
+
+template <class T, T...IntsA, T...IntsB>
+struct integer_sequence_cat<T, std::integer_sequence<T,IntsA...>, std::integer_sequence<T,IntsB...>> {
+    using type = std::integer_sequence<T,IntsA...,IntsB...>;
+};
+
+template <class T, T...IntsA, T...IntsB, typename...Sets>
+struct integer_sequence_cat<T, std::integer_sequence<T,IntsA...>, std::integer_sequence<T,IntsB...>,Sets...> {
+    using type = typename integer_sequence_cat<T,std::integer_sequence<T,IntsA...,IntsB...>,Sets...>::type;
+};
+
+template <typename...Sets>
+using index_sequence_cat = integer_sequence_cat<std::size_t, Sets...>;
+
+namespace detail {
+    template <typename Tuple, typename Sequence>
+    struct nopointer_sequence_impl;
+
+    template <typename Tuple, std::size_t...Indices>
+    struct nopointer_sequence_impl<Tuple,std::index_sequence<Indices...>> {
+        using type = typename index_sequence_cat<
+            typename std::conditional<
+                std::is_arithmetic<typename remotegl::tuple_element<Indices,Tuple>::type>::value,
+                std::index_sequence<Indices>,
+                std::index_sequence<>
+            >::type...
+        >::type;
+    };
+}
+
+namespace remotegl {
+    template <class T>
+    struct unwrap_refwrapper
+    {
+        using type = T;
+    };
+    
+    template <class T>
+    struct unwrap_refwrapper<std::reference_wrapper<T>>
+    {
+        using type = T&;
+    };
+    
+    template <class T>
+    using special_decay_t = typename unwrap_refwrapper<typename std::decay<T>::type>::type;
+
+    template <class... Types>
+    auto make_tuple(Types&&... args)
+    {
+        return tuple<special_decay_t<Types>...>(std::forward<Types>(args)...);
+    }
+}
+
+namespace remotegl {
+    namespace detail {
+        template <typename Tuple, typename Sequence>
+        struct multiget_impl;
+
+        template <typename Tuple, std::size_t...Indices>
+        struct multiget_impl<Tuple, std::index_sequence<Indices...>> {
+            static inline auto multiget(Tuple& tuple) {
+                return make_tuple(get<Indices>(tuple)...);
+            }
+        };
+    };
+
+    //template<typename
+}
+
+template <typename Tuple>
+using nopointer_sequence = typename detail::nopointer_sequence_impl<Tuple,
+        std::make_index_sequence<remotegl::tuple_size<Tuple>::value>>::type;
+
+using A = remotegl::tuple<int,float,int*,char>;
+using B = std::index_sequence<0,1,3>;
+
+static_assert(std::is_same<nopointer_sequence<A>, B>::value, "oopsy poopsy!");
+
+/*
+- need to construct a way of yanking all of the elements that we want from an argument pack
+- need a way to provide allocation type + size hint + hint to inject size information
+- need a way to hint whether to require a round trip or not (or these could just be manual)
+
+TODO:
+- need tuple type generator which is aware of the signature rules
+- define a get function which takes an argument pack and returns a specific element
+- use an index set construct of the desired arguments to make a new pack of just what we want
+- (send) call constructor with args for concrete elements to populate elements
+- (send) if all concrete args, just send this
+- (send) else, construct a scatter/gather list containing all of the args
+
+*/
 
 #endif /* REMOTEGL_PROTOCOL_HPP_ */

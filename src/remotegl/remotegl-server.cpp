@@ -302,9 +302,22 @@ void InvokeOGL_glUniformMatrix4fv()
     glUniformMatrix4fv(MSG.location, MSG.count, MSG.transpose, v);
 }
 
+void derp()
+{
+    using REQUEST_glUniformMatrix4fv = request<decltype(glUniformMatrix4fv),
+            RemoteGLFunction::OGL_glUniformMatrix4fv,
+            size_hints::mul<size_hints::num<16>,size_hints::arg<1>>>;
+    
+    REQUEST_glUniformMatrix4fv r;
+}
+
 // handles functions which use purely scalar types (no pointers to things)
 #define RECEIVER_IMPL_FUNC_SCALAR(a) case RemoteGLFunction::OGL_##a: \
     { receiver_impl<decltype(a)>::invoke(a, serverFd); break;  }
+
+// handles functions which use purely scalar types (no pointers to things)
+#define RECEIVER_IMPL2_FUNC_SCALAR(a) case RemoteGLFunction::OGL_##a: \
+    { receiver_impl2<decltype(a)>::invoke(a, serverFd); break;  }
 
 // template metaprogramming compile-time map
 using FunctionItem = std::pair<RemoteGLFunction, void (*)(void)>;
@@ -341,11 +354,12 @@ static constexpr void invokeFunction(RemoteGLFunction f,
 
 int rglDoServer(int fd, struct RemoteGLServerImpl* impl)
 {
-    //static_assert(std::is_same<signature<decltype(glUniform1iv)>::concrete_arguments_type,signature<decltype(glUniform1iv)>::arguments_type>::value,
-        //"oopsy doopsy");
-
     serverFd = fd;
     mImpl = impl;
+
+    remotegl::tuple<float, int, char> foo(3.14f, 42, 'b');
+
+    auto foo2 = remotegl::detail::multiget_impl<remotegl::tuple<float, int, char>, std::index_sequence<0,2>>::multiget(foo);
 
     while (run) {
         RemoteGLFunction function = RemoteGLFunction::SYNC;
@@ -356,7 +370,7 @@ int rglDoServer(int fd, struct RemoteGLServerImpl* impl)
 
         switch(function) {
             RECEIVER_IMPL_FUNC_SCALAR(glClear);
-            RECEIVER_IMPL_FUNC_SCALAR(glClearColor);
+            RECEIVER_IMPL2_FUNC_SCALAR(glClearColor);
             RECEIVER_IMPL_FUNC_SCALAR(glViewport);
             RECEIVER_IMPL_FUNC_SCALAR(glEnable);
             RECEIVER_IMPL_FUNC_SCALAR(glDisable);
