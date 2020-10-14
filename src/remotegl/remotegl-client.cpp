@@ -1,6 +1,7 @@
 #include <remotegl/remotegl-client.h>
 
 #include <cstring>
+#include <string>
 #include <unordered_map>
 
 #include <unistd.h>

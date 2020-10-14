@@ -1,5 +1,7 @@
 #include <remotegl/remotegl-client.h>
 
+#include <cstdio>
+#include <string>
 #include <unordered_map>
 
 #include <GL/glew.h>
